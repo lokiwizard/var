@@ -79,6 +79,7 @@ class VectorQuantizer2(nn.Module):
                     idx_N = torch.argmin(d_no_grad, dim=1)
                 
                 hit_V = idx_N.bincount(minlength=self.vocab_size).float()
+                handler = None
                 if self.training:
                     if dist.initialized(): handler = tdist.all_reduce(hit_V, async_op=True)
                 
@@ -91,8 +92,9 @@ class VectorQuantizer2(nn.Module):
                 f_hat = f_hat + h_BChw
                 f_rest -= h_BChw
                 
-                if self.training and dist.initialized():
-                    handler.wait()
+                if self.training:
+                    if handler is not None:
+                        handler.wait()
                     if self.record_hit == 0: self.ema_vocab_hit_SV[si].copy_(hit_V)
                     elif self.record_hit < 100: self.ema_vocab_hit_SV[si].mul_(0.9).add_(hit_V.mul(0.1))
                     else: self.ema_vocab_hit_SV[si].mul_(0.99).add_(hit_V.mul(0.01))
@@ -105,7 +107,8 @@ class VectorQuantizer2(nn.Module):
             # 但反向梯度按从 f_BChw 直通的路径传播。
             f_hat = (f_hat.data - f_no_grad).add_(f_BChw)
         
-        margin = tdist.get_world_size() * (f_BChw.numel() / f_BChw.shape[1]) / self.vocab_size * 0.08
+        world_size = tdist.get_world_size() if dist.initialized() else 1
+        margin = world_size * (f_BChw.numel() / f_BChw.shape[1]) / self.vocab_size * 0.08
         # margin = pn*pn / 100
         if ret_usages: usages = [(self.ema_vocab_hit_SV[si] >= margin).float().mean().item() * 100 for si, pn in enumerate(self.v_patch_nums)]
         else: usages = None
